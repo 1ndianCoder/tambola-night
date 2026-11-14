@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>Tambola Night: host</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+<style>
+  .top{display:grid;grid-template-columns:minmax(280px,360px) 1fr;gap:24px;align-items:start}
+  .bottom{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:24px}
+  @media (max-width:900px){.top,.bottom{grid-template-columns:1fr}}
+  .stage{display:grid;gap:12px;text-align:center}
+  .settings{display:flex;flex-wrap:wrap;gap:8px 16px;justify-content:center;color:var(--muted);font-size:.95rem}
+  .settings label{display:flex;align-items:center;gap:6px}
+  .invite{display:flex;gap:8px;margin-top:8px}
+  .invite input{flex:1;min-width:0;font-weight:600}
+  .log li{background:none;padding:3px 0;border-bottom:1px solid var(--line);border-radius:0;justify-content:flex-start;gap:10px}
+  .log time{color:var(--muted);font-size:.85rem;flex:none}
+  ol.steps{padding-left:1.2em}
+  ol.steps li{margin-bottom:6px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1 class="brand">Tambola Night</h1>
+    <p class="status" id="status"></p>
+  </header>
+  <div class="offline" id="offline">Can’t reach the game right now. Retrying…</div>
+
+  <!-- database not connected -->
+  <section id="dbView" class="card setup" hidden>
+    <h2>One more step: connect a database</h2>
+    <p>The game keeps its state in a free Redis database. In your Vercel project:</p>
+    <ol class="steps">
+      <li>Open the <strong>Storage</strong> tab and choose <strong>Upstash</strong> (Redis), then create a free database and connect it to this project.</li>
+      <li>Go to <strong>Deployments</strong>, open the menu on the latest one, and choose <strong>Redeploy</strong>.</li>
+      <li>Reload this page.</li>
+    </ol>
+    <p class="err" id="dbErr"></p>
+  </section>
+
+  <!-- choose / enter host password -->
+  <section id="keyView" class="card setup" hidden>
+    <h2 id="keyTitle">Host sign-in</h2>
+    <p id="keyIntro">Enter your host password.</p>
+    <form id="keyForm">
+      <input type="password" id="keyInput" autocomplete="current-password" placeholder="Host password" required minlength="4">
+      <button class="btn primary big" type="submit" id="keyBtn">Continue</button>
+      <p class="err" id="keyErr"></p>
+    </form>
+  </section>
+
+  <main id="main" hidden>
+    <div class="top">
+      <div class="stage">
+        <div class="ball idle" id="ball"><span class="num" id="num">Ready</span></div>
+        <p class="phrase" id="phrase">Press “Call next” or the space bar to start</p>
+        <p class="hint" id="count"></p>
+        <div class="row"><button class="btn primary big" id="callBtn">Call next</button></div>
+        <div class="row">
+          <button class="btn" id="autoBtn">Start auto-call</button>
+          <button class="btn" id="undoBtn">Undo last</button>
+          <button class="btn warn" id="newBtn">New game</button>
+        </div>
+        <div class="settings">
+          <label>Every <select id="interval">
+            <option value="4">4 s</option><option value="6" selected>6 s</option><option value="8">8 s</option>
+            <option value="10">10 s</option><option value="15">15 s</option></select></label>
+          <label><input type="checkbox" id="voice" checked> Announce aloud</label>
+          <label><input type="checkbox" id="rhyme" checked> Say the rhyme</label>
+        </div>
+        <div class="recent" id="recent"></div>
+      </div>
+      <div class="card"><div class="board" id="board" aria-label="Numbers board"></div></div>
+    </div>
+
+    <div class="bottom">
+      <section class="card">
+        <h2>Invite players</h2>
+        <p class="hint">Send this link to your players. They open it, type a name and get a ticket.</p>
+        <div class="invite">
+          <input type="text" id="inviteUrl" readonly>
+          <button class="btn" id="copyInvite">Copy</button>
+        </div>
+        <h2 style="margin-top:18px">Players <span class="hint" id="pcount"></span></h2>
+        <ul class="list" id="players"></ul>
+      </section>
+      <section class="card">
+        <h2>Prizes</h2>
+        <ul class="list" id="winners"></ul>
+        <p class="hint" style="margin-top:8px">Claims are checked automatically against the numbers called. Use “Cancel” to overrule one.</p>
+      </section>
+      <section class="card">
+        <h2>Activity</h2>
+        <ul class="list log" id="log"></ul>
+        <p class="hint" style="margin-top:10px"><button class="mini" id="signOut">Sign out of host</button></p>
+      </section>
+    </div>
+  </main>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script src="/calls.js"></script>
+<script>
+(function () {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  const store = {
+    get(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } },
+    set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} },
+  };
+  const prefs = Object.assign({ voice: true, rhyme: true }, store.get("tambola-host-prefs", {}));
+  const savePrefs = () => store.set("tambola-host-prefs", prefs);
+  $("voice").checked = prefs.voice; $("rhyme").checked = prefs.rhyme;
+  $("voice").addEventListener("change", (e) => { prefs.voice = e.target.checked; savePrefs(); });
+  $("rhyme").addEventListener("change", (e) => { prefs.rhyme = e.target.checked; savePrefs(); });
+  $("inviteUrl").value = location.origin + "/";
+
+  let key = new URLSearchParams(location.search).get("key") || store.get("tambola-host-key", "");
+  if (location.search) history.replaceState(null, "", location.pathname);
+  let st = null, details = null, detailsV = -1, detailsAt = 0;
+  let lastCount = -1, lastNews = null, fails = 0, busy = false, setupMode = false;
+
+  let toastT;
+  function toast(msg, ms) { const t = $("toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove("show"), ms || 2200); }
+
+  const board = $("board");
+  for (let n = 1; n <= 90; n++) { const d = document.createElement("div"); d.className = "cell"; d.id = "c" + n; d.textContent = n; board.appendChild(d); }
+
+  async function host(action, extra) {
+    const r = await fetch("/api/host", {
+      method: "POST", cache: "no-store", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(Object.assign({ key, action }, extra || {})),
+    });
+    const data = await r.json().catch(() => ({}));
+    return { status: r.status, ok: r.ok, data };
+  }
+
+  function show(view) {
+    $("dbView").hidden = view !== "db";
+    $("keyView").hidden = view !== "key";
+    $("main").hidden = view !== "main";
+  }
+  function askKey(first, msg) {
+    setupMode = first;
+    $("keyTitle").textContent = first ? "Choose a host password" : "Host sign-in";
+    $("keyIntro").textContent = first
+      ? "This is the first time the host screen has been opened. Pick a password only you know. You’ll need it to run the game from any device."
+      : "Enter your host password.";
+    $("keyInput").autocomplete = first ? "new-password" : "current-password";
+    $("keyErr").textContent = msg || "";
+    $("status").textContent = "";
+    show("key");
+    $("keyInput").focus();
+  }
+
+  // Handles the replies every host request can get.
+  function handleProblem(r) {
+    if (r.status === 503 && r.data.code === "NO_DB") { show("db"); $("status").textContent = ""; return true; }
+    if (r.data.code === "SETUP") { askKey(true); return true; }
+    if (r.data.code === "WRONG_KEY") { store.set("tambola-host-key", ""); askKey(false, key ? "That password isn’t right." : ""); return true; }
+    return false;
+  }
+
+  async function loadDetails() {
+    try {
+      const r = await host("details");
+      if (handleProblem(r)) return false;
+      if (!r.ok) throw new Error();
+      details = r.data; detailsV = r.data.state.v; detailsAt = Date.now();
+      takeState(r.data.state);
+      show("main");
+      return true;
+    } catch (e) { return false; }
+  }
+
+  function takeState(s) {
+    if (!st || s.v >= st.v || s.gameNo !== st.gameNo) st = s;
+  }
+
+  async function poll() {
+    try {
+      const r = await fetch("/api/state", { cache: "no-store" });
+      const data = await r.json().catch(() => ({}));
+      if (r.status === 503 && data.code === "NO_DB") { show("db"); return schedule(5000); }
+      if (!r.ok) throw new Error();
+      fails = 0; $("offline").style.display = "none";
+      takeState(data);
+      if (st.v !== detailsV || Date.now() - detailsAt > 20000) await loadDetails();
+      render();
+    } catch (e) {
+      if (++fails >= 3) $("offline").style.display = "block";
+    }
+    schedule(document.hidden ? 4000 : 1200);
+  }
+  let pollT;
+  function schedule(ms) { clearTimeout(pollT); pollT = setTimeout(poll, ms); }
+  document.addEventListener("visibilitychange", () => { if (!document.hidden && !$("main").hidden) schedule(0); });
+
+  async function act(action, extra) {
+    if (busy) return; busy = true;
+    try {
+      const r = await host(action, extra);
+      if (!handleProblem(r)) {
+        if (!r.ok) toast(r.data.error || "That didn’t work.");
+        else { st = r.data.state; render(); if (["remove", "revoke", "newgame", "undo"].includes(action)) { await loadDetails(); render(); } }
+      }
+    } catch (e) { toast("Can’t reach the game. Check your connection."); }
+    busy = false;
+  }
+
+  function twoStep(btn, label, action) {
+    let armed = false, t;
+    btn.addEventListener("click", () => {
+      if (armed) { clearTimeout(t); armed = false; btn.textContent = label; action(); return; }
+      armed = true; btn.textContent = "Tap again to confirm";
+      t = setTimeout(() => { armed = false; btn.textContent = label; }, 3000);
+    });
+  }
+  const fmtTime = (ms) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+  function render() {
+    if (!st || $("main").hidden) return;
+    const called = st.called, n = called.length, last = called[n - 1];
+    $("status").textContent = `Game ${st.gameNo}, ${st.playerCount} player${st.playerCount === 1 ? "" : "s"} joined`;
+    const ball = $("ball");
+    if (last) {
+      ball.classList.remove("idle"); $("num").textContent = last; $("phrase").textContent = CALLS[last];
+      if (lastCount !== -1 && n > lastCount) {
+        ball.classList.remove("pop"); void ball.offsetWidth; ball.classList.add("pop");
+        if (prefs.voice) speakCall(last, prefs.rhyme);
+      }
+    } else {
+      ball.classList.add("idle"); $("num").textContent = "Ready"; $("phrase").textContent = "Press “Call next” or the space bar to start";
+    }
+    lastCount = n;
+    $("count").textContent = st.winners.full ? `Full house won by ${st.winners.full.name}` : (n >= 90 ? "All 90 numbers called" : `${n} of 90 called`);
+    const set = new Set(called);
+    for (let i = 1; i <= 90; i++) { const c = $("c" + i); c.classList.toggle("hit", set.has(i)); c.classList.toggle("last", i === last); }
+    const rec = $("recent"); rec.innerHTML = "";
+    called.slice(-6, -1).reverse().forEach((x) => { const s = document.createElement("span"); s.className = "chip"; s.textContent = x; rec.appendChild(s); });
+
+    $("callBtn").disabled = st.over;
+    $("undoBtn").disabled = n === 0;
+    $("autoBtn").textContent = st.auto.on ? "Pause auto-call" : "Start auto-call";
+    $("autoBtn").disabled = st.over && !st.auto.on;
+    const sel = $("interval"), iv = String(st.auto.interval);
+    if (document.activeElement !== sel) {
+      if (![...sel.options].some((o) => o.value === iv)) sel.add(new Option(iv + " s", iv));
+      sel.value = iv;
+    }
+
+    const newsId = st.news ? st.news.id : "";
+    if (lastNews !== null && newsId && newsId !== lastNews) toast(st.news.text, 4000);
+    lastNews = newsId;
+
+    if (!details) return;
+    $("pcount").textContent = `(${details.players.length})`;
+    const pl = $("players"); pl.innerHTML = "";
+    if (!details.players.length) { const li = document.createElement("li"); li.textContent = "Nobody yet. Share the link above."; li.className = "hint"; pl.appendChild(li); }
+    details.players.forEach((p) => {
+      const li = document.createElement("li");
+      const s = document.createElement("span"); s.textContent = p.name;
+      const b = document.createElement("button"); b.className = "mini"; b.textContent = "Remove";
+      b.addEventListener("click", () => act("remove", { pid: p.pid }));
+      li.append(s, b); pl.appendChild(li);
+    });
+
+    const wl = $("winners"); wl.innerHTML = "";
+    Object.entries(st.prizes).forEach(([k, label]) => {
+      const li = document.createElement("li");
+      const a = document.createElement("span"); a.textContent = label;
+      const right = document.createElement("span");
+      const w = st.winners[k];
+      if (w) {
+        const name = document.createElement("strong"); name.textContent = w.name;
+        const b = document.createElement("button"); b.className = "mini"; b.textContent = "Cancel";
+        b.addEventListener("click", () => act("revoke", { prize: k }));
+        right.append(name, b);
+      } else { right.className = "hint"; right.textContent = "Open"; }
+      li.append(a, right); wl.appendChild(li);
+    });
+
+    const lg = $("log"); lg.innerHTML = "";
+    details.log.forEach((e) => {
+      const li = document.createElement("li");
+      const t = document.createElement("time"); t.textContent = fmtTime(e.at);
+      const s = document.createElement("span"); s.textContent = e.text;
+      li.append(t, s); lg.appendChild(li);
+    });
+  }
+
+  $("callBtn").addEventListener("click", () => act("call", { expect: st.called.length }));
+  $("autoBtn").addEventListener("click", () => act("auto", { on: !st.auto.on, interval: +$("interval").value }));
+  $("interval").addEventListener("change", () => { if (st.auto.on) act("auto", { on: true, interval: +$("interval").value }); });
+  $("undoBtn").addEventListener("click", () => act("undo"));
+  twoStep($("newBtn"), "New game", () => act("newgame"));
+  $("copyInvite").addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText($("inviteUrl").value); toast("Invite link copied"); }
+    catch (e) { $("inviteUrl").select(); toast("Press Ctrl+C to copy"); }
+  });
+  $("signOut").addEventListener("click", () => { store.set("tambola-host-key", ""); key = ""; clearTimeout(pollT); askKey(false); });
+  document.addEventListener("keydown", (e) => {
+    if ($("main").hidden) return;
+    const tag = (e.target.tagName || "").toLowerCase();
+    if (["input", "select", "textarea", "button"].includes(tag)) return;
+    if ((e.code === "Space" || e.key === "Enter") && st && !st.over) { e.preventDefault(); act("call", { expect: st.called.length }); }
+  });
+
+  $("keyForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const val = $("keyInput").value;
+    $("keyErr").textContent = ""; $("keyBtn").disabled = true;
+    try {
+      if (setupMode) {
+        const r = await host("setup", { key: val });
+        if (!r.ok && !handleProblem(r)) { $("keyErr").textContent = r.data.error || "Couldn’t save that password."; $("keyBtn").disabled = false; return; }
+      }
+      key = val;
+      if (await loadDetails()) { store.set("tambola-host-key", key); $("keyInput").value = ""; render(); schedule(0); }
+    } catch (err) { $("keyErr").textContent = "Can’t reach the game. Check your connection."; }
+    $("keyBtn").disabled = false;
+  });
+
+  (async () => {
+    if (await loadDetails()) { store.set("tambola-host-key", key); render(); schedule(0); }
+    else if ($("main").hidden && $("dbView").hidden && $("keyView").hidden) { $("offline").style.display = "block"; setTimeout(() => location.reload(), 5000); }
+  })();
+})();
+</script>
+</body>
+</html>

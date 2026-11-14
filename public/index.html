@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Tambola Night</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+<style>
+  .wrap{max-width:560px}
+  .stack{display:grid;gap:16px}
+  .join{display:grid;gap:10px}
+  .join input{width:100%;font-size:1.2rem}
+  .toggles{display:flex;flex-wrap:wrap;gap:6px 16px;color:var(--muted);font-size:.92rem;margin-top:8px}
+  .toggles label{display:flex;align-items:center;gap:6px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1 class="brand">Tambola Night</h1>
+    <p class="status" id="status">Connecting…</p>
+  </header>
+  <div class="offline" id="offline">Connection lost. Reconnecting…</div>
+
+  <section id="setupView" class="card" hidden>
+    <h2>The game isn’t ready yet</h2>
+    <p id="setupMsg">The host is still setting things up. Try again in a few minutes.</p>
+  </section>
+
+  <section id="joinView" class="card" hidden>
+    <h2>Join the game</h2>
+    <form class="join" id="joinForm">
+      <input type="text" id="name" maxlength="24" placeholder="Your name" autocomplete="nickname" required>
+      <button class="btn primary big" type="submit" id="joinBtn">Get my ticket</button>
+      <p class="err" id="joinErr"></p>
+    </form>
+  </section>
+
+  <section id="gameView" class="stack" hidden>
+    <div id="banner" class="banner" hidden></div>
+    <div>
+      <div class="ball small idle" id="ball"><span class="num" id="num">Wait</span></div>
+      <p class="phrase" id="phrase">The host will start calling soon</p>
+      <div class="recent" id="recent" style="margin-top:8px"></div>
+    </div>
+
+    <div>
+      <div class="ticket">
+        <div class="row" style="justify-content:space-between;margin-bottom:6px">
+          <strong id="you"></strong>
+          <button class="mini" id="clearMarks">Clear marks</button>
+        </div>
+        <div class="tgrid" id="ticket"></div>
+      </div>
+      <div class="toggles">
+        <label><input type="checkbox" id="showCalled" checked> Shade called numbers</label>
+        <label><input type="checkbox" id="speak"> Read numbers aloud</label>
+      </div>
+      <p class="hint" style="margin-top:6px">Tap a number to mark it.</p>
+    </div>
+
+    <div>
+      <h2>Claim a prize</h2>
+      <div class="prizes" id="prizes"></div>
+    </div>
+  </section>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script src="/calls.js"></script>
+<script>
+(function () {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  const store = {
+    get(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } },
+    set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} },
+  };
+
+  let pid = store.get("tambola-pid", "");
+  let me = null;          // { name, gameNo, ticket }
+  let st = null;          // latest public state
+  let lastCount = -1, lastNews = null, fails = 0, loadingMe = false;
+  const prefs = Object.assign({ showCalled: true, speak: false }, store.get("tambola-player-prefs", {}));
+  $("showCalled").checked = prefs.showCalled;
+  $("speak").checked = prefs.speak;
+  $("showCalled").addEventListener("change", (e) => { prefs.showCalled = e.target.checked; store.set("tambola-player-prefs", prefs); render(); });
+  $("speak").addEventListener("change", (e) => { prefs.speak = e.target.checked; store.set("tambola-player-prefs", prefs); });
+
+  let toastT;
+  function toast(msg, ms) {
+    const t = $("toast"); t.textContent = msg; t.classList.add("show");
+    clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove("show"), ms || 2600);
+  }
+
+  async function api(path, opts) {
+    const r = await fetch(path, Object.assign({ cache: "no-store" }, opts || {}));
+    const data = await r.json().catch(() => ({}));
+    return { status: r.status, ok: r.ok, data };
+  }
+
+  /* ---- polling ---- */
+  async function poll() {
+    try {
+      const r = await api("/api/state");
+      if (r.status === 503 && r.data.code === "NO_DB") { showSetup(); return schedule(5000); }
+      if (!r.ok) throw new Error("bad");
+      fails = 0; $("offline").style.display = "none";
+      if (!st || r.data.v >= st.v || r.data.gameNo !== st.gameNo) st = r.data;
+      if (pid && (!me || me.gameNo !== st.gameNo)) await loadMe();
+      render();
+    } catch (e) {
+      if (++fails >= 3) $("offline").style.display = "block";
+    }
+    schedule(document.hidden ? 5000 : 1500);
+  }
+  let pollT;
+  function schedule(ms) { clearTimeout(pollT); pollT = setTimeout(poll, ms); }
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) schedule(0); });
+
+  async function loadMe() {
+    if (loadingMe) return; loadingMe = true;
+    try {
+      const r = await api("/api/me?pid=" + encodeURIComponent(pid));
+      if (r.status === 404) { pid = ""; me = null; store.set("tambola-pid", ""); }
+      else if (r.ok) me = r.data;
+    } catch (e) {}
+    loadingMe = false;
+  }
+
+  function showSetup() {
+    $("setupView").hidden = false; $("joinView").hidden = true; $("gameView").hidden = true;
+    $("status").textContent = "";
+  }
+
+  const marksKey = () => `tambola-marks-${pid}-${me ? me.gameNo : 0}`;
+
+  function render() {
+    if (!st) return;
+    $("setupView").hidden = true;
+    const n = st.called.length;
+    $("status").textContent = `Game ${st.gameNo}, ${n} of 90 called, ${st.playerCount} playing`;
+
+    if (!pid || !me) { $("joinView").hidden = false; $("gameView").hidden = true; return; }
+    $("joinView").hidden = true; $("gameView").hidden = false;
+    $("you").textContent = me.name + "’s ticket";
+
+    const last = st.called[n - 1];
+    const ball = $("ball");
+    if (last) {
+      ball.classList.remove("idle"); $("num").textContent = last; $("phrase").textContent = CALLS[last];
+      if (lastCount !== -1 && n > lastCount) {
+        ball.classList.remove("pop"); void ball.offsetWidth; ball.classList.add("pop");
+        if (prefs.speak) speakCall(last, true);
+      }
+    } else {
+      ball.classList.add("idle"); $("num").textContent = "Wait"; $("phrase").textContent = "The host will start calling soon";
+    }
+    lastCount = n;
+    const rec = $("recent"); rec.innerHTML = "";
+    st.called.slice(-6, -1).reverse().forEach((x) => { const s = document.createElement("span"); s.className = "chip"; s.textContent = x; rec.appendChild(s); });
+
+    const banner = $("banner");
+    if (st.winners.full) { banner.hidden = false; banner.textContent = `Game over! ${st.winners.full.name} got the full house.`; }
+    else if (n >= 90) { banner.hidden = false; banner.textContent = "All 90 numbers have been called."; }
+    else banner.hidden = true;
+    const newsId = st.news ? st.news.id : "";
+    if (lastNews !== null && newsId && newsId !== lastNews) toast(st.news.text, 4000);
+    lastNews = newsId;
+
+    const marks = new Set(store.get(marksKey(), []));
+    const calledSet = new Set(st.called);
+    const grid = $("ticket"); grid.innerHTML = "";
+    me.ticket.flat().forEach((x) => {
+      const d = document.createElement("div");
+      if (!x) { d.className = "blank"; d.setAttribute("aria-hidden", "true"); }
+      else {
+        d.className = "num"; d.textContent = x; d.tabIndex = 0; d.setAttribute("role", "button");
+        if (marks.has(x)) { d.classList.add("mark"); d.setAttribute("aria-pressed", "true"); }
+        else if (prefs.showCalled && calledSet.has(x)) d.classList.add("called");
+        const toggle = () => { marks.has(x) ? marks.delete(x) : marks.add(x); store.set(marksKey(), [...marks]); render(); };
+        d.addEventListener("click", toggle);
+        d.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } });
+      }
+      grid.appendChild(d);
+    });
+
+    const pz = $("prizes"); pz.innerHTML = "";
+    Object.entries(st.prizes).forEach(([key, label]) => {
+      const b = document.createElement("button");
+      b.className = "prize"; b.textContent = label;
+      const s = document.createElement("small");
+      const w = st.winners[key];
+      if (w) { b.disabled = true; b.classList.add("won"); s.textContent = w.name === me.name ? "You won this!" : `Won by ${w.name}`; }
+      else { s.textContent = "Tap to claim"; b.disabled = st.over; }
+      b.appendChild(s);
+      b.addEventListener("click", () => claim(key, b));
+      pz.appendChild(b);
+    });
+  }
+
+  async function claim(key, btn) {
+    btn.disabled = true;
+    try {
+      const r = await api("/api/claim", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pid, prize: key }) });
+      toast(r.data.message || r.data.error || "Something went wrong.", 4000);
+      if (r.data.gone) { pid = ""; me = null; store.set("tambola-pid", ""); }
+    } catch (e) { toast("Couldn’t reach the game. Try again."); }
+    btn.disabled = false;
+    schedule(300);
+  }
+
+  $("clearMarks").addEventListener("click", () => { store.set(marksKey(), []); render(); });
+
+  $("joinForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const name = $("name").value.trim();
+    if (!name) return;
+    $("joinErr").textContent = ""; $("joinBtn").disabled = true;
+    try {
+      const r = await api("/api/join", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
+      if (!r.ok) $("joinErr").textContent = r.data.error || "Couldn’t join.";
+      else { pid = r.data.pid; store.set("tambola-pid", pid); lastCount = -1; await loadMe(); render(); }
+    } catch (err) { $("joinErr").textContent = "Couldn’t reach the game. Check your connection and try again."; }
+    $("joinBtn").disabled = false;
+  });
+
+  poll();
+})();
+</script>
+</body>
+</html>

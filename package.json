@@ -1,0 +1,10 @@
+{
+  "name": "tambola-night",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Multiplayer tambola (housie) you can host on Vercel",
+  "scripts": {
+    "dev": "node dev-server.js"
+  },
+  "license": "MIT"
+}
