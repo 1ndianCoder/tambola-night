@@ -88,3 +88,6 @@ input[type=text],select{background:var(--surface);border:2px solid var(--line);b
 .setup form{display:grid;gap:10px;margin-top:12px}
 .setup input{width:100%;font-size:1.1rem}
 .err{color:var(--no);font-weight:600;min-height:1.4em;margin:0}
+
+/* Make sure hidden sections stay hidden even when they have a display style */
+[hidden]{display:none!important}
